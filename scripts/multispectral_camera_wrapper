@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+
+import rospy
+from multispectral_camera_wrapper.multispectral_camera_wrapper import \
+    MultiSpectralCameraWrapper
+
+if __name__ == '__main__':
+    rospy.init_node("multispectral_camera_wrapper")
+    rospy.Rate(30)
+    rospy.loginfo("Multispectral camera wrapper node is running...")
+    ms_wrapper = MultiSpectralCameraWrapper()
+
+    try:
+        ms_wrapper.initialize()
+        while not rospy.is_shutdown():
+            rospy.sleep(0.05)
+    except rospy.ROSInterruptException as exc:
+        print("Multispectral camera wrapper node exiting...")
