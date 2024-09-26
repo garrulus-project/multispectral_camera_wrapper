@@ -4,6 +4,10 @@ import time
 import rospy
 import ptpy
 
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+
 from rospkg import RosPack
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -37,6 +41,9 @@ class MultiSpectralCameraWrapper(object):
         # Create Open PTP session
         response = self.camera.open_session()
         rospy.loginfo(f"Camera initiated with session id {response.SessionID}, transaction id {response.TransactionID}, response {response.ResponseCode}")
+
+        self.bridge = CvBridge()
+
 
     def event_callback(self, data: String) -> None:
         event_out_data = String()
@@ -208,8 +215,8 @@ class MultiSpectralCameraWrapper(object):
         # get latest dir info
         dir_info_new = self.get_directory_info()
         
-        file_format_to_save = ["TIFF", "EXIF_JPEG", "UndefinedImage"]
-        #file_format_to_save = ["EXIF_JPEG", "TIFF"]
+        # file_format_to_save = ["TIFF", "EXIF_JPEG", "UndefinedImage"]
+        file_format_to_save = ["EXIF_JPEG"]
         #file_format_to_save = ["TIFF"]
 
         # now start taking the image with the 2nd index of a new dir
@@ -238,6 +245,26 @@ class MultiSpectralCameraWrapper(object):
                         #print(f"Saving {info.Filename}, Start ndex {start_idx}, all handles {len(all_handles)}, handles {len(handles)} ")
                         #with open(f"images/{info.Filename}", mode='wb') as f:
                         #    f.write(obj.Data)
+                        
+                        if not obj.Data:
+                            rospy.logerr("No image data received.")
+                            continue
+
+                        # convert and decode image to np array and cv
+                        obj_array = np.frombuffer(obj.Data, np.uint8)
+                        
+                        if obj_array.size == 0:
+                            rospy.logerr("Received empty buffer from image data.")
+                            continue
+
+                        img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
+
+                        if img is None:
+                            rospy.logerr("Failed to decode image.")
+                            continue
+
+                        img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                        self._pub_ms_data.publish(img_msg)
 
                         image_count += 1
 
@@ -250,7 +277,9 @@ class MultiSpectralCameraWrapper(object):
             
             end_time = time.time()
             runtime = end_time - start_time
-            print(f"Runtime: {runtime/len(handles):.2f} seconds / file")
+            if len(handles) > 0:
+                runtime = runtime/len(handles)
+            rospy.loginfo(f"Runtime: {runtime:.2f} seconds / file")
 
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(1.0)
