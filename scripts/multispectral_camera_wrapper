@@ -16,3 +16,4 @@ if __name__ == '__main__':
             rospy.sleep(0.05)
     except rospy.ROSInterruptException as exc:
         print("Multispectral camera wrapper node exiting...")
+        # ms_wrapper.destroy_all()

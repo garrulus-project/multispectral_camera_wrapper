@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="debug" default="true" />
+    <arg name="storage_id" default="65537" />
+    <arg name="save_files" default="false" />
+
+    <node pkg="multispectral_camera_wrapper" type="multispectral_camera_wrapper" name="multispectral_camera_wrapper" output="screen" >
+        <param name="storage_id" type="int" value="$(arg storage_id)" />
+        <param name="save_files" type="bool" value="$(arg save_files)" />
+    </node>
+</launch>

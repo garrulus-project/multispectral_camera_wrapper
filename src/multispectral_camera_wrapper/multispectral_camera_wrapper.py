@@ -1,5 +1,6 @@
 import os
 import time
+import copy
 
 import rospy
 import ptpy
@@ -19,13 +20,25 @@ class MultiSpectralCameraWrapper(object):
 
 
     def __init__(self):
-        self._config_file = rospy.get_param("~config_path", None)
         pkg_path = RosPack().get_path("multispectral_camera_wrapper")
 
+        self._config_file = rospy.get_param("~config_path", None)
         #if not os.path.isfile(self._config_file):
         #    rospy.logwarn("Config file is not given or does not exist")
 
         #self._config = file_utils.parse_yaml_config(self._config_file)
+
+        # get ros params
+        self._storage_id = rospy.get_param("~storage_id", 65537)
+        self._object_format = rospy.get_param("~object_format", 0)
+        self._file_format_to_save = rospy.get_param("~file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
+        self._capture_interval = rospy.get_param("~capture_interval", 1.0)
+        self._save_files = rospy.get_param("~save_files", False)
+
+        if self._save_files:
+            self.image_path = os.path.join(pkg_path, "images")
+            os.makedirs(self.image_path, exist_ok=True)
+
         self._debug = rospy.get_param("~debug", False)
         
         # flag to continuously update object info retrived from get_object_handles
@@ -44,7 +57,6 @@ class MultiSpectralCameraWrapper(object):
 
         self.bridge = CvBridge()
 
-
     def event_callback(self, data: String) -> None:
         event_out_data = String()
         if data.data == "e_start_capture":
@@ -52,7 +64,7 @@ class MultiSpectralCameraWrapper(object):
             self.saving_image_state = True
             
             ## Initiate timelapse capture
-            self.initiate_open_capture()
+            self.initiate_open_capture(storage_id=self._storage_id, object_format=self._object_format)
             rospy.loginfo("Open capture has been initiated...")
             
             # Sent event out without waiting image retrieval to be done
@@ -98,20 +110,27 @@ class MultiSpectralCameraWrapper(object):
         self._pub_event = rospy.Publisher("~event_out", String, queue_size=1)
 
         # publishers
-        self._pub_ms_data = rospy.Publisher("~ms_data", Image, queue_size=1)
-        self._pub_debug_img = rospy.Publisher("~debug_image", Image, queue_size=1)
+        self._pub_nir = rospy.Publisher("~nir", Image, queue_size=1)
+        self._pub_rgb = rospy.Publisher("~rgb", Image, queue_size=1)
+        self._pub_reg = rospy.Publisher("~reg", Image, queue_size=1)
+        self._pub_red = rospy.Publisher("~red", Image, queue_size=1)
+        self._pub_gre = rospy.Publisher("~gre", Image, queue_size=1)
 
-    def get_handles(self, storage_id=65537):
+    def get_handles(self, storage_id=65537, object_format=0):
         """
         Get all object handles (directory for each capture)
-        Defautl storage id = 65537 (internal)
+        Defautl storage id = 65537 (internal), memory card = 131073
+        Args
+            storage_id: id of the storage e.g. internal or memory card
+            object_format: 0 for all formats or specify the format TIFF,
+                EXIF_JPEG, UndefinedImage
         """
         handles = self.camera.get_object_handles(
-            storage_id=storage_id,# memory card storage id = 131073
-            object_format="TIFF",
+            storage_id=storage_id,
+            object_format=object_format,
             # object_handle=0,
-            all_storage_ids=False, # disable this if storage id is specified
-            all_formats=True,
+            all_storage_ids=False if storage_id is not None else True,
+            all_formats=True if object_format==0 else False,
             in_root=False,
         )
         return handles
@@ -137,7 +156,7 @@ class MultiSpectralCameraWrapper(object):
                     dir_info[current_dir_name]['parent_object'] = info.ParentObject
         return dir_info
     
-    def initiate_open_capture(self):
+    def initiate_open_capture(self, storage_id=65537, object_format=0):
         """
         Initiate open capture or timelapse capture
         ToDo: we can filter object format to reduce computation
@@ -150,8 +169,8 @@ class MultiSpectralCameraWrapper(object):
 
         ## Initiate timelapse capture
         self.capture = self.camera.initiate_open_capture(
-                storage_id=65537,
-                object_format=0,
+                storage_id=storage_id,
+                object_format=object_format,
         )
         # Wait for capture event
         event = self.camera.event(wait=False)
@@ -170,6 +189,15 @@ class MultiSpectralCameraWrapper(object):
         # Close the PTP session
         self.camera.close_session()
         rospy.loginfo("Open camera session has been closed...")
+
+    def __del__(self):
+        """
+        Destroy all capture and sessions
+        """
+        self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
+        self.camera.close_session()
+        self.camera._shutdown()
+        rospy.logwarn("All capture and sessions are closed")
 
     def delete_all_files(self):
         """
@@ -200,10 +228,17 @@ class MultiSpectralCameraWrapper(object):
                 new_directory = list(dir_info_new.keys())[-1]
 
             dir_info_new = self.get_directory_info()
-            time.sleep(1.0)
+            time.sleep(self._capture_interval)
             
         self.latest_directory = new_directory
-        
+       
+
+    def retrieve_other_files(self):
+        """
+        diag.dat and params.dat are appended after a capture is stopped
+        retrieve them with this funton
+        """
+        pass
         
     def retrieve_image(self, delete_retrieved_file=False):
         """
@@ -215,13 +250,13 @@ class MultiSpectralCameraWrapper(object):
         # get latest dir info
         dir_info_new = self.get_directory_info()
         
-        # file_format_to_save = ["TIFF", "EXIF_JPEG", "UndefinedImage"]
-        file_format_to_save = ["EXIF_JPEG"]
-        #file_format_to_save = ["TIFF"]
-
         # now start taking the image with the 2nd index of a new dir
         # +1 because the first index is the dir itself
         start_idx = dir_info_new[self.latest_directory]["start_handle_idx"] + 1
+
+        # keep track of start_idx to be used later when retrieving
+        # sequoia_diag.dat and sequoia_params.dat
+        dir_start_idx = copy.deepcopy(start_idx)
         
         image_count = 0
 
@@ -239,13 +274,14 @@ class MultiSpectralCameraWrapper(object):
                         continue
 
                     # save image
-                    if info.ObjectFormat in file_format_to_save:
+                    if info.ObjectFormat in self._file_format_to_save:
                         obj = self.camera.get_object(handle)
-                        rospy.loginfo("Saving image %s", info.Filename)
-                        #print(f"Saving {info.Filename}, Start ndex {start_idx}, all handles {len(all_handles)}, handles {len(handles)} ")
-                        #with open(f"images/{info.Filename}", mode='wb') as f:
-                        #    f.write(obj.Data)
-                        
+                        # rospy.loginfo("Saving image %s", info.Filename)
+                        if self._save_files:
+                            rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
+                            with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
+                                f.write(obj.Data)
+
                         if not obj.Data:
                             rospy.logerr("No image data received.")
                             continue
@@ -264,8 +300,18 @@ class MultiSpectralCameraWrapper(object):
                             continue
 
                         img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                        self._pub_ms_data.publish(img_msg)
-
+                       
+                        if "RGB" in info.Filename:
+                            self._pub_rgb.publish(img_msg)
+                        elif "NIR" in info.Filename:
+                            self._pub_nir.publish(img_msg)
+                        elif "REG" in info.Filename:
+                            self._pub_reg.publish(img_msg)
+                        elif "RED" in info.Filename:
+                            self._pub_red.publish(img_msg)
+                        elif "GRE" in info.Filename:
+                            self._pub_gre.publish(img_msg)
+                        
                         image_count += 1
 
                     if not self.saving_image_state:
@@ -282,7 +328,25 @@ class MultiSpectralCameraWrapper(object):
             rospy.loginfo(f"Runtime: {runtime:.2f} seconds / file")
 
             # delay < 0.0 is too short and may cause the file is not yet fully written
-            time.sleep(1.0)
+            time.sleep(self._capture_interval)
+        
+        # retrieve other files such as sequoia_diag.dat and sequoia_params.data
+        rospy.loginfo("Retrieving squoia_diag.dat and sequoia_params.dat files...")
+        all_handles = self.get_handles()
+        handles = all_handles[dir_start_idx:]
+        for i,handle in enumerate(handles):
+            info = self.camera.get_object_info(handle)
+            if info is None:
+                continue
+
+            # save image
+            if ".dat" in info.Filename:
+                obj = self.camera.get_object(handle)
+                # rospy.loginfo("Saving image %s", info.Filename)
+                if self._save_files:
+                    rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
+                    with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
+                        f.write(obj.Data)
 
             
         # delete all files
