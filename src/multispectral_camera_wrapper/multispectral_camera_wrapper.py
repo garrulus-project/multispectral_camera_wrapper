@@ -1,6 +1,11 @@
 import os
+import re
 import time
 import copy
+import datetime
+
+import threading
+import queue
 
 import rospy
 import ptpy
@@ -34,6 +39,7 @@ class MultiSpectralCameraWrapper(object):
         self._file_format_to_save = rospy.get_param("~file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
         self._capture_interval = rospy.get_param("~capture_interval", 1.0)
         self._save_files = rospy.get_param("~save_files", False)
+        self._data_type = rospy.get_param("~data_type", np.uint16)
 
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
@@ -45,7 +51,7 @@ class MultiSpectralCameraWrapper(object):
         self.update_object_info = True
         
         # if enabled, it will continuously retrieve, save or publish new images to a ros topic
-        self.saving_image_state = True
+        self.publish_image_flag = True
          
         # Initialize the camera connection here, because if it's stopped and
         # re-initialize during runtime, it will not find the USB
@@ -56,12 +62,15 @@ class MultiSpectralCameraWrapper(object):
         rospy.loginfo(f"Camera initiated with session id {response.SessionID}, transaction id {response.TransactionID}, response {response.ResponseCode}")
 
         self.bridge = CvBridge()
+   
+        # start multithreading for image retrieval
+        self.init_image_retrieve_threading()
 
     def event_callback(self, data: String) -> None:
         event_out_data = String()
         if data.data == "e_start_capture":
-            # set saving image state to True
-            self.saving_image_state = True
+            # set publish image flag to True
+            self.publish_image_flag = True
             
             ## Initiate timelapse capture
             self.initiate_open_capture(storage_id=self._storage_id, object_format=self._object_format)
@@ -72,11 +81,16 @@ class MultiSpectralCameraWrapper(object):
             self._pub_event.publish(event_out_data)
 
             rospy.loginfo("Retrieving image...")
-            self.retrieve_image(delete_retrieved_file=False)
+            #self.retrieve_image(delete_retrieved_file=False)
+            #self.start_image_retrieve_threading()
+            self.retrieve_image_thread.start()
 
         elif data.data == "e_stop_capture":
             # set saving image state to False to exit while-loop in image saving func
-            self.saving_image_state = False
+            self.publish_image_flag = False
+            
+            # stop threading
+            self.stop_retrieve_event.set()
             
             rospy.loginfo("Stopping open capture...")
             self.stop_open_capture()
@@ -102,7 +116,20 @@ class MultiSpectralCameraWrapper(object):
              
             event_out_data.data = "e_session_stopped"
             self._pub_event.publish(event_out_data)
-            
+
+
+    def init_image_retrieve_threading(self):
+        """
+        Start multithreading for image retrieval from the camera
+        """
+        # create image queue and stop event
+        self.image_queue = queue.Queue()
+        self.stop_retrieve_event = threading.Event()
+        # Create threads
+        self.retrieve_image_thread = threading.Thread(target=self.retrieve_images)
+
+        # Start threads
+        #self.retrieve_image_thread.start()
 
     def initialize(self) -> None:
         #start event in and out
@@ -196,6 +223,7 @@ class MultiSpectralCameraWrapper(object):
         """
         self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
         self.camera.close_session()
+        self.stop_retrieve_event.set()
         rospy.logwarn("All capture and sessions are closed")
 
     def delete_all_files(self):
@@ -238,11 +266,36 @@ class MultiSpectralCameraWrapper(object):
         retrieve them with this funton
         """
         pass
+
+    def convert_ptp_timestamp_to_ros(self, filename, header):
+        """
+        Convert image time stamp from Filename to ROS timestamp
+        """
+        # Regex to extract date and time (matches 240930_164044)
+        match = re.search(r'(\d{6}_\d{6})', filename)
+
+        if match:
+            # Extracted date-time string
+            datetime_str = match.group(1)
+
+            # Parse the date and time using the format YYMMDD_HHMMSS
+            dt = datetime.strptime(datetime_str, "%y%m%d_%H%M%S")
+
+            # Convert to ROS timestamp (seconds since epoch)
+            secs = int(time.mktime(dt.timetuple()))
+            nsecs = 0  # No fractional seconds
+
+            header.stamp.secs = secs
+            header.stamp.nsecs = nsecs
+
+            rospy.logdebug(f"Extracted ROS Time: {header.stamp.secs}.{header.stamp.nsecs} seconds since epoch")
+        else:
+            rospy.logdebug("No valid timestamp found in filename.")
         
-    def retrieve_image(self, delete_retrieved_file=False):
+    def retrieve_images(self):
         """
         Retrive new images, save or publish to a ros topic
-        if saving_image_state is enabled
+        if publish_image_flag is enabled
         ToDo:
         add a trigger via a topic to enable and disable this
         """
@@ -261,8 +314,13 @@ class MultiSpectralCameraWrapper(object):
 
         prev_handles_count = 0
 
-        while self.saving_image_state:
-            start_time = time.time()
+        while not self.stop_retrieve_event.is_set():
+            # # Extract the timestamp from the image filename
+            # timestamp = get_timestamp_from_filename(image_path)
+
+            # # Group images by timestamp in a dictionary
+            # image_queue.put((timestamp, image_path))
+            
             all_handles = self.get_handles()
             handles = all_handles[start_idx:]
 
@@ -275,59 +333,83 @@ class MultiSpectralCameraWrapper(object):
                     # save image
                     if info.ObjectFormat in self._file_format_to_save:
                         obj = self.camera.get_object(handle)
-                        # rospy.loginfo("Saving image %s", info.Filename)
-                        if self._save_files:
-                            rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
-                            with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
-                                f.write(obj.Data)
 
                         if not obj.Data:
                             rospy.logerr("No image data received.")
                             continue
 
                         # convert and decode image to np array and cv
-                        obj_array = np.frombuffer(obj.Data, np.uint8)
+                        obj_array = np.frombuffer(obj.Data, self._data_type)
                         
                         if obj_array.size == 0:
                             rospy.logerr("Received empty buffer from image data.")
                             continue
 
-                        img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
-
-                        if img is None:
-                            rospy.logerr("Failed to decode image.")
-                            continue
-
-                        img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                        if "RGB" in info.Filename:
-                            self._pub_rgb.publish(img_msg)
-                        elif "NIR" in info.Filename:
-                            self._pub_nir.publish(img_msg)
-                        elif "REG" in info.Filename:
-                            self._pub_reg.publish(img_msg)
-                        elif "RED" in info.Filename:
-                            self._pub_red.publish(img_msg)
-                        elif "GRE" in info.Filename:
-                            self._pub_gre.publish(img_msg)
-                        
-                        image_count += 1
-
-                    if not self.saving_image_state:
-                        rospy.loginfo(f"Saving image state is disabled, waiting for the last files to be retrieved...")
+                        self.image_queue.put((obf.Filename, obj_array))
 
                 start_idx += len(handles)
             else:
-                print("No new handles to process: ", len(all_handles), len(handles), start_idx)
+                rospy.loginfo("No new handles to process: ", len(all_handles), len(handles), start_idx)
             
-            end_time = time.time()
-            runtime = end_time - start_time
-            if len(handles) > 0:
-                runtime = runtime/len(handles)
-            rospy.loginfo(f"Runtime: {runtime:.2f} seconds / file")
-
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(self._capture_interval)
+
+    def publish_image(self, delete_retrieved_file=False):
+        """
+        Retrive new images, save or publish to a ros topic
+        if publish_image_flag is enabled
+        ToDo:
+        add a trigger via a topic to enable and disable this
+        """
+        # get latest dir info
+        dir_info_new = self.get_directory_info()
         
+        # now start taking the image with the 2nd index of a new dir
+        # +1 because the first index is the dir itself
+        start_idx = dir_info_new[self.latest_directory]["start_handle_idx"] + 1
+
+        # keep track of start_idx to be used later when retrieving
+        # sequoia_diag.dat and sequoia_params.dat
+        dir_start_idx = copy.deepcopy(start_idx)
+        
+        image_count = 0
+
+        prev_handles_count = 0
+
+        while not self.stop_retrieve_event.is_set():
+            try:
+                # Get the next image from the queue
+                filename, obj_array = self.image_queue.get(timeout=1)
+
+                img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
+                if img is None:
+                    rospy.logerr("Failed to decode image.")
+                    continue
+
+                img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
+                
+                if "RGB" in filename:
+                    self._pub_rgb.publish(img_msg)
+                elif "NIR" in filename:
+                    self._pub_nir.publish(img_msg)
+                elif "REG" in filename:
+                    self._pub_reg.publish(img_msg)
+                elif "RED" in filename:
+                    self._pub_red.publish(img_msg)
+                elif "GRE" in filename:
+                    self._pub_gre.publish(img_msg)
+
+                # save files
+                if self._save_files:
+                    rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
+                    with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
+                        f.write(obj_array)
+
+            except self.image_queue.Empty:
+                continue
+       
+        rospy.logwarn("Camera capture has been terminated...")
         # retrieve other files such as sequoia_diag.dat and sequoia_params.data
         rospy.loginfo("Retrieving squoia_diag.dat and sequoia_params.dat files...")
         all_handles = self.get_handles()
