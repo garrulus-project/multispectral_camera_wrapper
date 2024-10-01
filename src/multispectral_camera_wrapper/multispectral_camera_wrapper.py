@@ -17,6 +17,7 @@ from cv_bridge import CvBridge
 from rospkg import RosPack
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from uas_msgs.msg import MultispectralImages
 
 
 class MultiSpectralCameraWrapper(object):
@@ -40,6 +41,8 @@ class MultiSpectralCameraWrapper(object):
         self._capture_interval = rospy.get_param("~capture_interval", 1.0)
         self._save_files = rospy.get_param("~save_files", False)
         self._data_type = rospy.get_param("~data_type", np.uint16)
+        # parameter for publishing all images into a single topic
+        self._publish_group_images = rospy.get_param("~_publish_group_images", False)
 
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
@@ -65,6 +68,15 @@ class MultiSpectralCameraWrapper(object):
    
         # start multithreading for image retrieval
         self.init_image_retrieve_threading()
+
+    def __del__(self):
+        """
+        Destructor. Delete all capture and session
+        """
+        self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
+        self.camera.close_session()
+        self.stop_retrieve_event.set()
+        rospy.logwarn("All capture and sessions are closed")
 
     def event_callback(self, data: String) -> None:
         event_out_data = String()
@@ -108,15 +120,15 @@ class MultiSpectralCameraWrapper(object):
             self._pub_event.publish(event_out_data)
 
         elif data.data == "e_stop_session":
+            # stop threading
+            self.stop_retrieve_event.set()
             rospy.loginfo("Closing camera session...")
             self.close_open_session()
             rospy.loginfo("Camera session has been closed...")
-            
             rospy.logwarn("Session has been closed, restart the node to start a new session...!")
              
             event_out_data.data = "e_session_stopped"
             self._pub_event.publish(event_out_data)
-
 
     def init_image_retrieve_threading(self):
         """
@@ -137,11 +149,12 @@ class MultiSpectralCameraWrapper(object):
         self._pub_event = rospy.Publisher("~event_out", String, queue_size=1)
 
         # publishers
-        self._pub_nir = rospy.Publisher("~nir", Image, queue_size=1)
-        self._pub_rgb = rospy.Publisher("~rgb", Image, queue_size=1)
-        self._pub_reg = rospy.Publisher("~reg", Image, queue_size=1)
-        self._pub_red = rospy.Publisher("~red", Image, queue_size=1)
-        self._pub_gre = rospy.Publisher("~gre", Image, queue_size=1)
+        self._pub_nir = rospy.Publisher("~image/nir", Image, queue_size=1)
+        self._pub_rgb = rospy.Publisher("~image/rgb", Image, queue_size=1)
+        self._pub_reg = rospy.Publisher("~image/reg", Image, queue_size=1)
+        self._pub_red = rospy.Publisher("~image/red", Image, queue_size=1)
+        self._pub_gre = rospy.Publisher("~image/gre", Image, queue_size=1)
+        self._pub_ms_images = rospy.Publisher("~image/images", MultispectralImages, queue_size=1)
 
     def get_handles(self, storage_id=65537, object_format=0):
         """
@@ -216,15 +229,6 @@ class MultiSpectralCameraWrapper(object):
         # Close the PTP session
         self.camera.close_session()
         rospy.loginfo("Open camera session has been closed...")
-
-    def __del__(self):
-        """
-        Destructor. Delete all capture and session
-        """
-        self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
-        self.camera.close_session()
-        self.stop_retrieve_event.set()
-        rospy.logwarn("All capture and sessions are closed")
 
     def delete_all_files(self):
         """
@@ -371,10 +375,9 @@ class MultiSpectralCameraWrapper(object):
         # keep track of start_idx to be used later when retrieving
         # sequoia_diag.dat and sequoia_params.dat
         dir_start_idx = copy.deepcopy(start_idx)
-        
         image_count = 0
-
         prev_handles_count = 0
+        image_group = {}
 
         while not self.stop_retrieve_event.is_set():
             try:
@@ -389,16 +392,46 @@ class MultiSpectralCameraWrapper(object):
                 img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
                 self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
                 
+                spectrum = None
+
                 if "RGB" in filename:
                     self._pub_rgb.publish(img_msg)
+                    spectrum = "RGB"
                 elif "NIR" in filename:
                     self._pub_nir.publish(img_msg)
+                    spectrum = "NIR"
                 elif "REG" in filename:
                     self._pub_reg.publish(img_msg)
+                    spectrum = "REG"
                 elif "RED" in filename:
                     self._pub_red.publish(img_msg)
+                    spectrum = "RED"
                 elif "GRE" in filename:
                     self._pub_gre.publish(img_msg)
+                    spectrum = "GRE"
+
+                if _publish_group_images:
+                    timestamp = img_msg.header.stam.secs
+                    if timestamp not in image_groups:
+                        image_groups[timestamp] = {}
+
+                    if spectrum is not None:
+                        image_groups[timestamp][spectrum] = img_msg
+
+                    # If we have a complete set of 5 images, publish them
+                    # assuming that each comes sequentially
+                    # ToDo: run this in another thread???
+                    if len(image_groups[timestamp]) == 5:
+                        ms_msg = MultispectralImages()
+                        ms_msg.rgb = image_group[timestamp]["RGB"]
+                        ms_msg.nir = image_group[timestamp]["NIR"]
+                        ms_msg.reg = image_group[timestamp]["REG"]
+                        ms_msg.red = image_group[timestamp]["RED"]
+                        ms_msg.gre = image_group[timestamp]["GRE"]
+                        ms_msg.header = ms_msg.rgb.header
+                        self._publish_group_images.publish(ms_msg)
+
+                        del image_groups[timestamp]
 
                 # save files
                 if self._save_files:
