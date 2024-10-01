@@ -38,7 +38,7 @@ class MultiSpectralCameraWrapper(object):
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
             os.makedirs(self.image_path, exist_ok=True)
-
+        
         self._debug = rospy.get_param("~debug", False)
         
         # flag to continuously update object info retrived from get_object_handles
@@ -192,11 +192,10 @@ class MultiSpectralCameraWrapper(object):
 
     def __del__(self):
         """
-        Destroy all capture and sessions
+        Destructor. Delete all capture and session
         """
         self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
         self.camera.close_session()
-        self.camera._shutdown()
         rospy.logwarn("All capture and sessions are closed")
 
     def delete_all_files(self):
@@ -300,7 +299,6 @@ class MultiSpectralCameraWrapper(object):
                             continue
 
                         img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                       
                         if "RGB" in info.Filename:
                             self._pub_rgb.publish(img_msg)
                         elif "NIR" in info.Filename:
@@ -347,7 +345,6 @@ class MultiSpectralCameraWrapper(object):
                     rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
                     with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
                         f.write(obj.Data)
-
             
         # delete all files
         #if delete_retrieved_file:
