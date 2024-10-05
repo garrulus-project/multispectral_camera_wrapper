@@ -2,7 +2,7 @@ import os
 import re
 import time
 import copy
-import datetime
+from datetime import datetime
 
 import threading
 import queue
@@ -16,7 +16,7 @@ from cv_bridge import CvBridge
 
 from rospkg import RosPack
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Byte, ByteMultiArray, UInt8MultiArray
 from uas_msgs.msg import MultispectralImages
 
 
@@ -40,7 +40,7 @@ class MultiSpectralCameraWrapper(object):
         self._file_format_to_save = rospy.get_param("~file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
         self._capture_interval = rospy.get_param("~capture_interval", 1.0)
         self._save_files = rospy.get_param("~save_files", False)
-        self._data_type = rospy.get_param("~data_type", np.uint16)
+        self._data_type = rospy.get_param("~data_type", np.uint8)
         # parameter for publishing all images into a single topic
         self._publish_group_images = rospy.get_param("~_publish_group_images", False)
 
@@ -64,16 +64,22 @@ class MultiSpectralCameraWrapper(object):
         response = self.camera.open_session()
         rospy.loginfo(f"Camera initiated with session id {response.SessionID}, transaction id {response.TransactionID}, response {response.ResponseCode}")
 
+        storage_ids = self.camera.get_storage_ids()
+        for sids in storage_ids:
+            rospy.loginfo("Storage id: %s", sids)
+
         self.bridge = CvBridge()
    
         # start multithreading for image retrieval
         self.init_image_retrieve_threading()
 
+        rospy.loginfo("Camera session has been initiated, now send e_start_capture trigger...")
+
     def __del__(self):
         """
         Destructor. Delete all capture and session
         """
-        self.camera.terminate_open_capture(transaction_id=self.captur.TransactionID)
+        self.camera.terminate_open_capture(transaction_id=self.capture.TransactionID)
         self.camera.close_session()
         self.stop_retrieve_event.set()
         rospy.logwarn("All capture and sessions are closed")
@@ -95,7 +101,11 @@ class MultiSpectralCameraWrapper(object):
             rospy.loginfo("Retrieving image...")
             #self.retrieve_image(delete_retrieved_file=False)
             #self.start_image_retrieve_threading()
-            self.retrieve_image_thread.start()
+            if not self.retrieve_image_thread.is_alive():
+                self.retrieve_image_thread.start()
+
+            # start publishing image
+            self.publish_image()
 
         elif data.data == "e_stop_capture":
             # set saving image state to False to exit while-loop in image saving func
@@ -155,6 +165,8 @@ class MultiSpectralCameraWrapper(object):
         self._pub_red = rospy.Publisher("~image/red", Image, queue_size=1)
         self._pub_gre = rospy.Publisher("~image/gre", Image, queue_size=1)
         self._pub_ms_images = rospy.Publisher("~image/images", MultispectralImages, queue_size=1)
+        self._pub_sequoia_diag = rospy.Publisher("~metadata/diag", UInt8MultiArray, queue_size=1)
+        self._pub_sequoia_param = rospy.Publisher("~metadata/param", UInt8MultiArray, queue_size=1)
 
     def get_handles(self, storage_id=65537, object_format=0):
         """
@@ -339,21 +351,21 @@ class MultiSpectralCameraWrapper(object):
                         obj = self.camera.get_object(handle)
 
                         if not obj.Data:
-                            rospy.logerr("No image data received.")
+                            rospy.logwarn("No image data received.")
                             continue
 
                         # convert and decode image to np array and cv
                         obj_array = np.frombuffer(obj.Data, self._data_type)
                         
                         if obj_array.size == 0:
-                            rospy.logerr("Received empty buffer from image data.")
+                            rospy.logwarn("Received empty buffer from image data.")
                             continue
 
-                        self.image_queue.put((obf.Filename, obj_array))
+                        self.image_queue.put((info.Filename, obj_array))
 
                 start_idx += len(handles)
             else:
-                rospy.loginfo("No new handles to process: ", len(all_handles), len(handles), start_idx)
+                rospy.loginfo("No new handles to process: %s %s %s", str(len(all_handles)), str(len(handles)), str(start_idx))
             
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(self._capture_interval)
@@ -378,6 +390,7 @@ class MultiSpectralCameraWrapper(object):
         image_count = 0
         prev_handles_count = 0
         image_group = {}
+        rospy.loginfo("Publishing multispectral data...")
 
         while not self.stop_retrieve_event.is_set():
             try:
@@ -386,7 +399,7 @@ class MultiSpectralCameraWrapper(object):
 
                 img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
                 if img is None:
-                    rospy.logerr("Failed to decode image.")
+                    rospy.logwarn(f"Failed to decode image {str(filename)}")
                     continue
 
                 img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
@@ -410,7 +423,7 @@ class MultiSpectralCameraWrapper(object):
                     self._pub_gre.publish(img_msg)
                     spectrum = "GRE"
 
-                if _publish_group_images:
+                if self._publish_group_images:
                     timestamp = img_msg.header.stam.secs
                     if timestamp not in image_groups:
                         image_groups[timestamp] = {}
@@ -429,7 +442,7 @@ class MultiSpectralCameraWrapper(object):
                         ms_msg.red = image_group[timestamp]["RED"]
                         ms_msg.gre = image_group[timestamp]["GRE"]
                         ms_msg.header = ms_msg.rgb.header
-                        self._publish_group_images.publish(ms_msg)
+                        self._pub_ms_images.publish(ms_msg)
 
                         del image_groups[timestamp]
 
@@ -439,7 +452,7 @@ class MultiSpectralCameraWrapper(object):
                     with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
                         f.write(obj_array)
 
-            except self.image_queue.Empty:
+            except queue.Empty:
                 continue
        
         rospy.logwarn("Camera capture has been terminated...")
@@ -452,15 +465,25 @@ class MultiSpectralCameraWrapper(object):
             if info is None:
                 continue
 
-            # save image
             if ".dat" in info.Filename:
+                rospy.loginfo("Metadata: %s", info.Filename)
                 obj = self.camera.get_object(handle)
+
+                metadata_msg = UInt8MultiArray()
+                metadata_msg.data = list(obj.Data)
+
+                if "diag" in info.Filename:
+                    self._pub_sequoia_diag.publish(metadata_msg)
+                elif "param" in info.Filename:
+                    self._pub_sequoia_param.publish(metadata_msg)
+
                 # rospy.loginfo("Saving image %s", info.Filename)
                 if self._save_files:
                     rospy.loginfo(f"Saving {self.image_path}/{info.Filename} ")
                     with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
                         f.write(obj.Data)
-            
+        
+        rospy.loginfo("Capture has been stopped...")
         # delete all files
         #if delete_retrieved_file:
         #    self.camera.delete_object(handle=handle)
