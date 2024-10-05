@@ -3,9 +3,14 @@
     <arg name="debug" default="true" />
     <arg name="storage_id" default="65537" />
     <arg name="save_files" default="false" />
+    <arg name="capture_interval" default="1" />
+    <!-- publish group image does not work yet-->
+    <arg name="publish_group_images" default="false" />
 
     <node pkg="multispectral_camera_wrapper" type="multispectral_camera_wrapper" name="multispectral_camera_wrapper" output="screen" >
         <param name="storage_id" type="int" value="$(arg storage_id)" />
         <param name="save_files" type="bool" value="$(arg save_files)" />
+        <param name="capture_interval" type="int" value="$(arg capture_interval)" />
+        <param name="publish_group_images" type="bool" value="$(arg publish_group_images)" />
     </node>
 </launch>
