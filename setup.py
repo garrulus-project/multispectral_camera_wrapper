@@ -25,7 +25,7 @@ setup(
     description='Multispectral camera wrapper package for ROS2',
     entry_points={
         'console_scripts': [
-            'multispectral_camera_wrapper = multispectral_camera_wrapper.multispectral_camera_wrapper:main',
+            'multispectral_camera_wrapper_node = multispectral_camera_wrapper.multispectral_camera_wrapper_node:main',
         ],
     },
 )
