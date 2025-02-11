@@ -1,15 +1,34 @@
-#!/usr/bin/env python3
+import os
+from glob import glob
+from setuptools import setup
 
-from distutils.core import setup
+package_name = 'multispectral_camera_wrapper'
 
-from catkin_pkg.python_setup import generate_distutils_setup
+setup(
+    name=package_name,
+    version='0.0.1',
+    packages=[package_name],
+    data_files=[
+        (os.path.join('share', package_name), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name), glob('config/*.yaml'))
+    ],
 
-d = generate_distutils_setup(
-    packages=['multispectral_camera_wrapper',
-             ],
-    package_dir={'multispectral_camera_wrapper': 'src/multispectral_camera_wrapper',
-                }
+    install_requires=[
+        'setuptools',
+        'sensor_msgs',
+        'cv_bridge'
+    ],
+    zip_safe=True,
+    author='Mohammad Wasil',
+    maintainer='Mohammad Wasil',
+    maintainer_email='mohammad.wasil@h-brs.de',
+    description='Multispectral camera wrapper package for ROS2',
+    entry_points={
+        'console_scripts': [
+            'multispectral_camera_wrapper = multispectral_camera_wrapper.multispectral_camera_wrapper:main',
+        ],
+    },
 )
 
-setup(**d)
+
 
