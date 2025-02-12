@@ -2,7 +2,7 @@
 
 ## Dependencies
 
-This ROS2 package depends on [PTPy](https://github.com/Parrot-Developers/sequoia-ptpy/tree/master). Follow the instruction and install PTPy.
+This ROS2 package depends on [PTPy](https://github.com/garrulus-project/sequoia-ptpy). Follow the instruction and install PTPy.
 
 * Clone and install ptpy from garrulus fork
   ```
