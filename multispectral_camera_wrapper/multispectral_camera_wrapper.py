@@ -8,7 +8,7 @@ import threading
 import queue
 
 import rclpy
-from rclp.node import Node
+from rclpy.node import Node
 
 import ptpy
 import cv2
@@ -505,16 +505,16 @@ class MultiSpectralCameraWrapper(Node):
         #if delete_retrieved_file:
         #    self.camera.delete_object(handle=handle)
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = MultiSpectralCameraWrapper()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+# def main(args=None):
+#     rclpy.init(args=args)
+#     node = MultiSpectralCameraWrapper()
+#     try:
+#         rclpy.spin(node)
+#     except KeyboardInterrupt:
+#         pass
+#     finally:
+#         node.destroy_node()
+#         rclpy.shutdown()
 
-if __name__ == '__main__':
-    main()
+# if __name__ == '__main__':
+#     main()

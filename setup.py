@@ -16,7 +16,8 @@ setup(
     install_requires=[
         'setuptools',
         'sensor_msgs',
-        'cv_bridge'
+        'cv_bridge',
+        'uas_msgs'
     ],
     zip_safe=True,
     author='Mohammad Wasil',
@@ -29,6 +30,4 @@ setup(
         ],
     },
 )
-
-
 
