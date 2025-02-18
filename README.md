@@ -60,19 +60,19 @@ ros2 run multispectral_camera_wrapper multispectral_camera_wrapper
 /multispectral_camera_wrapper/event_out
 
 # rgb image
-/multispectral_camera_wrapper/image/rgb
+/multispectral_camera_wrapper/image/rgb_raw
 
 # near-ir image
-/multispectral_camera_wrapper/image/nir
+/multispectral_camera_wrapper/image/nir_raw
 
 # red-edge spectrum
-/multispectral_camera_wrapper/image/reg
+/multispectral_camera_wrapper/image/reg_raw
 
 # red spectrum
-/multispectral_camera_wrapper/image/red
+/multispectral_camera_wrapper/image/red_raw
 
 # green spectrum
-/multispectral_camera_wrapper/image/gre
+/multispectral_camera_wrapper/image/gre_raw
 
 # metadata published once the e_stop_capture event is received
 /multispectral_camera_wrapper/metadata/diag
