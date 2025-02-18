@@ -18,7 +18,7 @@ from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Byte, ByteMultiArray, UInt8MultiArray
-from uas_msgs.msg import MultispectralImages
+from uas_msgs.msg import MultispectralImages, MultispectralImage16
 
 
 class MultiSpectralCameraWrapper(Node):
@@ -44,7 +44,7 @@ class MultiSpectralCameraWrapper(Node):
         self.declare_parameter("file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
         self.declare_parameter("capture_interval", 1.0)
         self.declare_parameter("save_files", False)
-        self.declare_parameter("data_type", "uint8")
+        self.declare_parameter("data_type", "uint16")
         self.declare_parameter("publish_group_images", False)
         self.declare_parameter("debug", False)
 
@@ -53,7 +53,7 @@ class MultiSpectralCameraWrapper(Node):
         self._file_format_to_save = self.get_parameter("file_format").value
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
-        self._data_type = getattr(np, self.get_parameter("data_type").value, np.uint8)
+        self._data_type = getattr(np, self.get_parameter("data_type").value, np.uint16)
         self._publish_group_images = self.get_parameter("publish_group_images").value
         self._debug = self.get_parameter("debug").value
 
@@ -176,11 +176,11 @@ class MultiSpectralCameraWrapper(Node):
         self._pub_event = self.create_publisher(String, "~/event_out", 10)
 
         # Publishers
-        self._pub_nir = self.create_publisher(Image, "~/image/nir", 10)
-        self._pub_rgb = self.create_publisher(Image, "~/image/rgb", 10)
-        self._pub_reg = self.create_publisher(Image, "~/image/reg", 10)
-        self._pub_red = self.create_publisher(Image, "~/image/red", 10)
-        self._pub_gre = self.create_publisher(Image, "~/image/gre", 10)
+        self._pub_nir = self.create_publisher(MultispectralImage16, "~/image/nir_raw", 10)
+        self._pub_reg = self.create_publisher(MultispectralImage16, "~/image/reg_raw", 10)
+        self._pub_red = self.create_publisher(MultispectralImage16, "~/image/red_raw", 10)
+        self._pub_gre = self.create_publisher(MultispectralImage16, "~/image/gre_raw", 10)
+        self._pub_rgb = self.create_publisher(Image, "~/image/rgb_raw", 10)
         self._pub_ms_images = self.create_publisher(MultispectralImages, "~/image/images", 10)
         self._pub_sequoia_diag = self.create_publisher(UInt8MultiArray, "~/metadata/diag", 10)
         self._pub_sequoia_param = self.create_publisher(UInt8MultiArray, "~/metadata/param", 10)
@@ -414,31 +414,42 @@ class MultiSpectralCameraWrapper(Node):
                 # Get the next image from the queue
                 filename, obj_array = self.image_queue.get(timeout=1)
 
-                img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
-                if img is None:
+                # decode image, and keep the image as is using arg IMREAD_UNCHANGED
+                decoded_image = cv2.imdecode(obj_array, cv2.IMREAD_UNCHANGED)
+
+                # img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
+                if decoded_image is None:
                     self.get_logger().warn(f"Failed to decode image {str(filename)}")
                     continue
-
-                img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
                 
                 spectrum = None
-
                 if "RGB" in filename:
+                    img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                    self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
                     self._pub_rgb.publish(img_msg)
                     spectrum = "RGB"
-                elif "NIR" in filename:
-                    self._pub_nir.publish(img_msg)
-                    spectrum = "NIR"
-                elif "REG" in filename:
-                    self._pub_reg.publish(img_msg)
-                    spectrum = "REG"
-                elif "RED" in filename:
-                    self._pub_red.publish(img_msg)
-                    spectrum = "RED"
-                elif "GRE" in filename:
-                    self._pub_gre.publish(img_msg)
-                    spectrum = "GRE"
+                else:
+                    # create MultispectralImage16 msg
+                    img_msg = MultispectralImage16
+                    img_msg.height = decoded_image.shape[0]
+                    img_msg.width = decoded_image.shape[1]
+                    img_msg.channel = 1
+                    
+                    img_msg.data = decoded_image.flatten().tolist()
+                    self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
+
+                    if "NIR" in filename:
+                        self._pub_nir.publish(img_msg)
+                        spectrum = "NIR"
+                    elif "REG" in filename:
+                        self._pub_reg.publish(img_msg)
+                        spectrum = "REG"
+                    elif "RED" in filename:
+                        self._pub_red.publish(img_msg)
+                        spectrum = "RED"
+                    elif "GRE" in filename:
+                        self._pub_gre.publish(img_msg)
+                        spectrum = "GRE"
 
                 if self._publish_group_images:
                     timestamp = img_msg.header.stam.secs
@@ -505,16 +516,3 @@ class MultiSpectralCameraWrapper(Node):
         #if delete_retrieved_file:
         #    self.camera.delete_object(handle=handle)
 
-# def main(args=None):
-#     rclpy.init(args=args)
-#     node = MultiSpectralCameraWrapper()
-#     try:
-#         rclpy.spin(node)
-#     except KeyboardInterrupt:
-#         pass
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
-
-# if __name__ == '__main__':
-#     main()
