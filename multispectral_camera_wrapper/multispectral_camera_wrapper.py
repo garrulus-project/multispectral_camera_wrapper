@@ -9,6 +9,7 @@ import queue
 
 import rclpy
 from rclpy.node import Node
+from builtin_interfaces.msg import Time
 
 import ptpy
 import cv2
@@ -17,7 +18,7 @@ from cv_bridge import CvBridge
 
 from ament_index_python.packages import get_package_share_directory
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Byte, ByteMultiArray, UInt8MultiArray
+from std_msgs.msg import String, Byte, ByteMultiArray, UInt8MultiArray, Header
 from uas_msgs.msg import MultispectralImages, MultispectralImage16
 
 
@@ -37,14 +38,13 @@ class MultiSpectralCameraWrapper(Node):
         #     self.get_logger().warn("Config file is not given or does not exist")
 
         # self._config = file_utils.parse_yaml_config(self._config_file)
-
         # Get ROS parameters
         self.declare_parameter("storage_id", 65537)
         self.declare_parameter("object_format", 0)
         self.declare_parameter("file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
-        self.declare_parameter("capture_interval", 1.0)
+        self.declare_parameter("capture_interval", 1)
         self.declare_parameter("save_files", False)
-        self.declare_parameter("data_type", "uint16")
+        self.declare_parameter("data_type", "uint8")
         self.declare_parameter("publish_group_images", False)
         self.declare_parameter("debug", False)
 
@@ -53,9 +53,17 @@ class MultiSpectralCameraWrapper(Node):
         self._file_format_to_save = self.get_parameter("file_format").value
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
-        self._data_type = getattr(np, self.get_parameter("data_type").value, np.uint16)
         self._publish_group_images = self.get_parameter("publish_group_images").value
         self._debug = self.get_parameter("debug").value
+        self._data_type = self.get_parameter("data_type").value
+
+        data_type_mapping = {
+            "uint16": np.uint16,
+            "uint8": np.uint8,
+            "uint32": np.uint32
+        }
+        self.ms_data_type = data_type_mapping.get(self._data_type,
+												  np.uint8)
 
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
@@ -69,6 +77,7 @@ class MultiSpectralCameraWrapper(Node):
 
         # Initialize the camera connection here, because if it's stopped and
         # re-initialized during runtime, it will not find the USB
+        self.get_logger().info("Initializing camera....")
         self.camera = ptpy.PTPy()
 
         # Create Open PTP session
@@ -85,7 +94,7 @@ class MultiSpectralCameraWrapper(Node):
         self.init_image_retrieve_threading()
 
         # Initialize ROS communications
-        self.initialize_ros_communications()
+        # self.initialize()
 
         self.get_logger().info("Camera session has been initiated, now send e_start_capture trigger...")
 
@@ -284,7 +293,8 @@ class MultiSpectralCameraWrapper(Node):
             ## Check if new direcory has been created
             if  len(list(dir_info_new.keys())) > len(list(self.dir_info_init.keys())):
                 new_dir_available = True
-                self.get_logger().info("New directory has been created %s",list(self.dir_info_init.keys())[-1])
+                # self.get_logger().info("New directory has been created %s",list(self.dir_info_init.keys())[-1])
+                self.get_logger().info(f"New directory has been created: {list(self.dir_info_init.keys())[-1]}")
                 new_directory = list(dir_info_new.keys())[-1]
 
             dir_info_new = self.get_directory_info()
@@ -316,12 +326,12 @@ class MultiSpectralCameraWrapper(Node):
 
             # Convert to ROS timestamp (seconds since epoch)
             secs = int(time.mktime(dt.timetuple()))
-            nsecs = 0  # No fractional seconds
+            nsecs = 0 
+            header.stamp = Time()
+            header.stamp.sec = secs
+            header.stamp.nanosec = nsecs
 
-            header.stamp.secs = secs
-            header.stamp.nsecs = nsecs
-
-            self.get_logger().debug(f"Extracted ROS Time: {header.stamp.secs}.{header.stamp.nsecs} seconds since epoch")
+            self.get_logger().debug(f"Extracted ROS Time: {header.stamp.sec}.{header.stamp.nanosec} seconds since epoch")
         else:
             self.get_logger().debug("No valid timestamp found in filename.")
         
@@ -372,7 +382,7 @@ class MultiSpectralCameraWrapper(Node):
                             continue
 
                         # convert and decode image to np array and cv
-                        obj_array = np.frombuffer(obj.Data, self._data_type)
+                        obj_array = np.frombuffer(obj.Data, self.ms_data_type)
                         
                         if obj_array.size == 0:
                             self.get_logger().warn("Received empty buffer from image data.")
@@ -382,7 +392,7 @@ class MultiSpectralCameraWrapper(Node):
 
                 start_idx += len(handles)
             else:
-                self.get_logger().info("No new handles to process: %s %s %s", str(len(all_handles)), str(len(handles)), str(start_idx))
+                self.get_logger().info(f"No new handles to process: {str(len(all_handles))}, {str(len(handles))}, {str(start_idx)}")
             
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(self._capture_interval)
@@ -413,6 +423,9 @@ class MultiSpectralCameraWrapper(Node):
             try:
                 # Get the next image from the queue
                 filename, obj_array = self.image_queue.get(timeout=1)
+                
+                if obj_array is not None:
+                    continue
 
                 # decode image, and keep the image as is using arg IMREAD_UNCHANGED
                 decoded_image = cv2.imdecode(obj_array, cv2.IMREAD_UNCHANGED)
@@ -422,10 +435,12 @@ class MultiSpectralCameraWrapper(Node):
                     self.get_logger().warn(f"Failed to decode image {str(filename)}")
                     continue
                 
+                msg_header = Header()
+
                 spectrum = None
                 if "RGB" in filename:
                     img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
-                    self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
+                    self.convert_ptp_timestamp_to_ros(filename, msg_header)
                     self._pub_rgb.publish(img_msg)
                     spectrum = "RGB"
                 else:
@@ -435,8 +450,9 @@ class MultiSpectralCameraWrapper(Node):
                     img_msg.width = decoded_image.shape[1]
                     img_msg.channel = 1
                     
-                    img_msg.data = decoded_image.flatten().tolist()
-                    self.convert_ptp_timestamp_to_ros(filename, img_msg.header)
+                    # img_msg.data = decoded_image.flatten().tolist()
+                    img_msg.data = obj_array.flatten().tolist()
+                    self.convert_ptp_timestamp_to_ros(filename, msg_header)
 
                     if "NIR" in filename:
                         self._pub_nir.publish(img_msg)
@@ -470,7 +486,7 @@ class MultiSpectralCameraWrapper(Node):
                         ms_msg.red = image_group[timestamp]["RED"]
                         ms_msg.gre = image_group[timestamp]["GRE"]
                         ms_msg.header = ms_msg.rgb.header
-                        self._pub_ms_images.publish(ms_msg)
+                        # self._pub_ms_images.publish(ms_msg)
 
                         del image_groups[timestamp]
 
@@ -494,7 +510,7 @@ class MultiSpectralCameraWrapper(Node):
                 continue
 
             if ".dat" in info.Filename:
-                self.get_logger().info("Metadata: %s", info.Filename)
+                self.get_logger().info(f"Metadata: {info.Filename}")
                 obj = self.camera.get_object(handle)
 
                 metadata_msg = UInt8MultiArray()
