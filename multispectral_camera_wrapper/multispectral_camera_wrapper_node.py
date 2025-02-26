@@ -10,16 +10,30 @@ def main(args=None):
 
     ms_wrapper = MultiSpectralCameraWrapper()
     ms_wrapper.initialize()
+    
+    # setup multithreaded executor
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(ms_wrapper)
 
     ms_wrapper.get_logger().info("Multispectral camera wrapper node is running...")
 
     try:
-        rclpy.spin(ms_wrapper)
+        while rclpy.ok():
+           executor.spin()
     except KeyboardInterrupt:
         ms_wrapper.get_logger().warn("Multispectral camera wrapper node interrupted.")
-    finally:
-        ms_wrapper.destroy_node()
-        rclpy.shutdown()
+        pass
+
+    ms_wrapper.destroy_node()
+    rclpy.shutdown()
+
+    #try:
+    #    rclpy.spin(ms_wrapper)
+    #except KeyboardInterrupt:
+    #    ms_wrapper.get_logger().warn("Multispectral camera wrapper node interrupted.")
+    #finally:
+    #    # ms_wrapper.destroy_node()
+    #    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

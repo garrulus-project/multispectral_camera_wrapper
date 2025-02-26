@@ -62,8 +62,7 @@ class MultiSpectralCameraWrapper(Node):
             "uint8": np.uint8,
             "uint32": np.uint32
         }
-        self.ms_data_type = data_type_mapping.get(self._data_type,
-												  np.uint8)
+        self.ms_data_type = data_type_mapping.get(self._data_type,np.uint8)
 
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
@@ -110,40 +109,38 @@ class MultiSpectralCameraWrapper(Node):
     def event_callback(self, data: String) -> None:
         event_out_data = String()
         if data.data == "e_start_capture":
+            # Sent event out without waiting image retrieval to be done
+            event_out_data.data = "e_capture_started"
+
+            self._pub_event.publish(event_out_data)
             # set publish image flag to True
             self.publish_image_flag = True
             
             ## Initiate timelapse capture
             self.initiate_open_capture(storage_id=self._storage_id, object_format=self._object_format)
             self.get_logger().info("Open capture has been initiated...")
-            
-            # Sent event out without waiting image retrieval to be done
-            event_out_data.data = "e_capture_started"
-            self._pub_event.publish(event_out_data)
-
             self.get_logger().info("Retrieving image...")
             #self.retrieve_image(delete_retrieved_file=False)
             #self.start_image_retrieve_threading()
             if not self.retrieve_image_thread.is_alive():
                 self.retrieve_image_thread.start()
-
+            
             # start publishing image
             self.publish_image()
 
         elif data.data == "e_stop_capture":
+            self.get_logger().info("Stopping open capture...")
+            event_out_data.data = "e_capture_stopped"
+            self._pub_event.publish(event_out_data)
             # set saving image state to False to exit while-loop in image saving func
             self.publish_image_flag = False
             
             # stop threading
             self.stop_retrieve_event.set()
             
-            self.get_logger().info("Stopping open capture...")
             self.stop_open_capture()
             self.get_logger().info("Open capture has been stopped...")
             
-            event_out_data.data = "e_capture_stopped"
-            self._pub_event.publish(event_out_data)
-        
         elif data.data == "e_start_session":
             # Initialize the camera connection
             self.camera = ptpy.PTPy()
@@ -162,6 +159,10 @@ class MultiSpectralCameraWrapper(Node):
              
             event_out_data.data = "e_session_stopped"
             self._pub_event.publish(event_out_data)
+        else:
+            event_out_data.data = "unknown trigger"
+            self._pub_event.publish(event_out_data)
+
 
     def init_image_retrieve_threading(self):
         """
@@ -383,7 +384,7 @@ class MultiSpectralCameraWrapper(Node):
 
                         # convert and decode image to np array and cv
                         obj_array = np.frombuffer(obj.Data, self.ms_data_type)
-                        
+
                         if obj_array.size == 0:
                             self.get_logger().warn("Received empty buffer from image data.")
                             continue
