@@ -35,24 +35,24 @@ colcon build --symlink-install
 Before starting this node, **make sure all images are removed from the storage** to avoid PTP communication interuption due to large number of images in the camera storage. This can be done by connecting to the Sequoia wifi, go to Gallery and `Delete all`.
 
 ```
-ros2 run multispectral_camera_wrapper multispectral_camera_wrapper
+ros2 launch multispectral_camera_wrapper multispectral_camera_wrapper.launch.py
 ```
 
 ## Send events
 
 * Start capture
   ```
-  ros2 topic pub /multispectral_camera_wrapper/event_in std_msgs/String e_start_capture
+  ros2 topic pub /multispectral_camera_wrapper_node/event_in std_msgs/msg/String "data: 'e_start_capture'"
   ```
 * Stop capture
   ```
-  ros2 topic pub /multispectral_camera_wrapper/event_in std_msgs/String e_stop_capture
+  ros2 topic pub /multispectral_camera_wrapper_node/event_in std_msgs/msg/String "data: 'e_stop_capture'"
   ```
-* Stop session
+* Stop camera
   ```
-  ros2 topic pub /multispectral_camera_wrapper/event_in std_msgs/String e_stop_session
+  ros2 topic pub /multispectral_camera_wrapper_node/event_in std_msgs/msg/String "data: 'e_stop_camera'"
   ```
-  Note: if you sent `e_stop_session`, you need to restart this node
+  Note: if you sent `e_stop_camera`, you need to restart this node
 
 ## Outputs
 ```
