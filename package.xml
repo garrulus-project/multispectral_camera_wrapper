@@ -13,12 +13,11 @@
   <depend>rclcpp</depend>
   <depend>std_srvs</depend>
   <depend>gphoto2pp</depend>
+  <depend>uas_msgs</depend>
   <build_depend>rclpy</build_depend>
-  <build_depend>uas_msgs</build_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>uas_msgs</exec_depend>
   <exec_depend>libgphoto2</exec_depend>
 
   <export>
