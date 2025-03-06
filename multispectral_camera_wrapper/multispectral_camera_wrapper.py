@@ -18,84 +18,67 @@ from cv_bridge import CvBridge
 
 from ament_index_python.packages import get_package_share_directory
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Byte, ByteMultiArray, UInt8MultiArray, Header
-from uas_msgs.msg import MultispectralImages, MultispectralImage16
+from std_msgs.msg import String, UInt8MultiArray, Header
+from uas_msgs.msg import MultispectralImage16
 
 
 class MultiSpectralCameraWrapper(Node):
     """
     Parrot Sequoia multispectral camera wrapper
     """
+
     def __init__(self):
-        super().__init__('multispectral_camera_wrapper')
+        super().__init__("multispectral_camera_wrapper")
 
         pkg_path = get_package_share_directory("multispectral_camera_wrapper")
 
-        # Load parameters
-        self.declare_parameter("config_path", None)
-        self._config_file = self.get_parameter("config_path").value
-        # if not os.path.isfile(self._config_file):
-        #     self.get_logger().warn("Config file is not given or does not exist")
-
-        # self._config = file_utils.parse_yaml_config(self._config_file)
         # Get ROS parameters
         self.declare_parameter("storage_id", 65537)
         self.declare_parameter("object_format", 0)
-        self.declare_parameter("file_format", ["EXIF_JPEG", "TIFF", "UndefinedImage"])
+        self.declare_parameter("file_format", "EXIF_JPEG,TIFF,UndefinedImage")
         self.declare_parameter("capture_interval", 1)
         self.declare_parameter("save_files", False)
-        self.declare_parameter("data_type", "uint8")
-        self.declare_parameter("publish_group_images", False)
         self.declare_parameter("debug", False)
 
         self._storage_id = self.get_parameter("storage_id").value
+        # this is the object format to retrieve from the camera
         self._object_format = self.get_parameter("object_format").value
-        self._file_format_to_save = self.get_parameter("file_format").value
+        # this is the file format to publish or save
+        self._file_format_to_publish = self.get_parameter("file_format").value.split(
+            ","
+        )
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
-        self._publish_group_images = self.get_parameter("publish_group_images").value
         self._debug = self.get_parameter("debug").value
-        self._data_type = self.get_parameter("data_type").value
-
-        data_type_mapping = {
-            "uint16": np.uint16,
-            "uint8": np.uint8,
-            "uint32": np.uint32
-        }
-        self.ms_data_type = data_type_mapping.get(self._data_type,np.uint8)
 
         if self._save_files:
             self.image_path = os.path.join(pkg_path, "images")
             os.makedirs(self.image_path, exist_ok=True)
 
-        # Flag to continuously update object info retrieved from get_object_handles
-        self.update_object_info = True
-
-        # If enabled, continuously retrieve, save, or publish new images to a ROS topic
-        self.publish_image_flag = True
-
         # Initialize the camera connection here, because if it's stopped and
         # re-initialized during runtime, it will not find the USB
-        self.get_logger().info("Initializing camera....")
-        self.camera = ptpy.PTPy()
+        self.camera_initialized = False
+        self.initialize_camera()
 
-        # Create Open PTP session
-        response = self.camera.open_session()
-        self.get_logger().info(f"Camera initiated with session ID {response.SessionID}, transaction ID {response.TransactionID}")
-
-        storage_ids = self.camera.get_storage_ids()
-        for sids in storage_ids:
-            self.get_logger().info(f"Storage ID: {sids}")
+        # open capture flag
+        self.open_capture_initiated = False
 
         self.bridge = CvBridge()
 
-        # Start multithreading for image retrieval
-        self.init_image_retrieve_threading()
+        # create image queue and stop event
+        self.image_queue = queue.Queue()
 
         # Initialize ROS communications
-        # self.initialize()
+        self.initialize_ros_topics()
 
-        self.get_logger().info("Camera session has been initiated, now send e_start_capture trigger...")
+        # create threading events
+        self.stop_retrieve_event = threading.Event()
+        self.retrieve_image_thread = None
+        self.publish_image_thread = None
+
+        self.get_logger().info(
+            "Camera session has been initiated, now send e_start_capture trigger..."
+        )
 
     def __del__(self):
         """
@@ -109,91 +92,149 @@ class MultiSpectralCameraWrapper(Node):
     def event_callback(self, data: String) -> None:
         event_out_data = String()
         if data.data == "e_start_capture":
-            # Sent event out without waiting image retrieval to be done
             event_out_data.data = "e_capture_started"
-
             self._pub_event.publish(event_out_data)
-            # set publish image flag to True
-            self.publish_image_flag = True
-            
-            ## Initiate timelapse capture
-            self.initiate_open_capture(storage_id=self._storage_id, object_format=self._object_format)
-            self.get_logger().info("Open capture has been initiated...")
-            self.get_logger().info("Retrieving image...")
-            #self.retrieve_image(delete_retrieved_file=False)
-            #self.start_image_retrieve_threading()
-            if not self.retrieve_image_thread.is_alive():
+
+            if not self.camera_initialized:
+                self.get_logger().error(
+                    "Camera is not initialized, please restart the node."
+                )
+                return
+
+            self.get_logger().info("Starting open capture...")
+            # Initiate open capture
+            if not self.open_capture_initiated:
+                self.initiate_open_capture(
+                    storage_id=self._storage_id, object_format=self._object_format
+                )
+                self.get_logger().info("Open capture has been initiated...")
+
+            if (
+                self.retrieve_image_thread is None
+                or not self.retrieve_image_thread.is_alive()
+            ):
+                self.stop_retrieve_event.clear()
+                self.retrieve_image_thread = threading.Thread(
+                    target=self.retrieve_images, daemon=False
+                )
                 self.retrieve_image_thread.start()
-            
-            # start publishing image
-            self.publish_image()
+                self.get_logger().info("Retrieve image thread started...")
+
+            if (
+                self.publish_image_thread is None
+                or not self.publish_image_thread.is_alive()
+            ):
+                self.publish_image_thread = threading.Thread(
+                    target=self.publish_image, daemon=False
+                )
+                self.publish_image_thread.start()
+                self.get_logger().info("Publish image thread started...")
 
         elif data.data == "e_stop_capture":
-            self.get_logger().info("Stopping open capture...")
             event_out_data.data = "e_capture_stopped"
             self._pub_event.publish(event_out_data)
-            # set saving image state to False to exit while-loop in image saving func
-            self.publish_image_flag = False
-            
+
+            if not self.camera_initialized:
+                self.get_logger().error(
+                    "Camera is not initialized, please restart the node."
+                )
+                return
+
+            self.get_logger().info("Stopping open capture...")
+            # disable open capture flag
+            self.open_capture_initiated = False
+
             # stop threading
             self.stop_retrieve_event.set()
-            
             self.stop_open_capture()
-            self.get_logger().info("Open capture has been stopped...")
-            
-        elif data.data == "e_start_session":
-            # Initialize the camera connection
-            self.camera = ptpy.PTPy()
-            # Create Open PTP session
-            response = self.camera.open_session()
+
+        elif data.data == "e_start_camera":
+            # initialize camera
+            if not self.camera_initialized:
+                self.initialize_camera()
+
             event_out_data.data = "e_session_started"
             self._pub_event.publish(event_out_data)
 
-        elif data.data == "e_stop_session":
+        elif data.data == "e_stop_camera":
+            if not self.camera_initialized:
+                self.get_logger().error(
+                    "Camera is not initialized, please restart the node."
+                )
+                return
+
             # stop threading
             self.stop_retrieve_event.set()
             self.get_logger().info("Closing camera session...")
             self.close_open_session()
             self.get_logger().info("Camera session has been closed...")
-            self.get_logger().warn("Session has been closed, restart the node to start a new session...!")
-             
+            self.get_logger().warn(
+                "Session has been closed, restart the node to start a new session...!"
+            )
+
             event_out_data.data = "e_session_stopped"
             self._pub_event.publish(event_out_data)
         else:
             event_out_data.data = "unknown trigger"
             self._pub_event.publish(event_out_data)
 
-
-    def init_image_retrieve_threading(self):
+    def initialize_camera(self):
         """
-        Start multithreading for image retrieval from the camera
+        Initialize the camera
         """
-        # create image queue and stop event
-        self.image_queue = queue.Queue()
-        self.stop_retrieve_event = threading.Event()
-        # Create threads
-        self.retrieve_image_thread = threading.Thread(target=self.retrieve_images)
+        self.get_logger().info("Initializing camera....")
+        # catch the exception if the camera is not connected
+        try:
+            self.camera = ptpy.PTPy()
+            # Create Open PTP session
+            response = self.camera.open_session()
+            self.get_logger().info(
+                f"Camera initiated with session ID {response.SessionID}, transaction ID {response.TransactionID}"
+            )
 
-        # Start threads
-        #self.retrieve_image_thread.start()
+            storage_ids = self.camera.get_storage_ids()
+            for sids in storage_ids:
+                self.get_logger().info(f"Storage ID: {sids}")
 
-    def initialize(self) -> None:
+            self.camera_initialized = True
+
+        except Exception as e:
+            self.get_logger().error(f"Error: {e}")
+            self.get_logger().error(
+                "Camera is probably not connected, "
+                "please connect the camera and restart the node.",
+            )
+
+    def initialize_ros_topics(self) -> None:
         """
         Initialize topics
         """
-        # string event topic
-        self._sub_event = self.create_subscription(String, "~/event_in", self.event_callback, 10)
+        # string event topic for event in and event out
+        self._sub_event = self.create_subscription(
+            String, "~/event_in", self.event_callback, 10
+        )
         self._pub_event = self.create_publisher(String, "~/event_out", 10)
 
         # Publishers
-        self._pub_nir = self.create_publisher(MultispectralImage16, "~/image/nir_raw", 10)
-        self._pub_reg = self.create_publisher(MultispectralImage16, "~/image/reg_raw", 10)
-        self._pub_red = self.create_publisher(MultispectralImage16, "~/image/red_raw", 10)
-        self._pub_gre = self.create_publisher(MultispectralImage16, "~/image/gre_raw", 10)
+        self._pub_nir = self.create_publisher(
+            MultispectralImage16, "~/image/nir_raw", 10
+        )
+        self._pub_reg = self.create_publisher(
+            MultispectralImage16, "~/image/reg_raw", 10
+        )
+        self._pub_red = self.create_publisher(
+            MultispectralImage16, "~/image/red_raw", 10
+        )
+        self._pub_gre = self.create_publisher(
+            MultispectralImage16, "~/image/gre_raw", 10
+        )
         self._pub_rgb = self.create_publisher(Image, "~/image/rgb_raw", 10)
-        self._pub_ms_images = self.create_publisher(MultispectralImages, "~/image/images", 10)
-        self._pub_sequoia_diag = self.create_publisher(UInt8MultiArray, "~/metadata/diag", 10)
-        self._pub_sequoia_param = self.create_publisher(UInt8MultiArray, "~/metadata/param", 10)
+        self._pub_sequoia_diag = self.create_publisher(
+            UInt8MultiArray, "~/metadata/diag", 10
+        )
+        self._pub_sequoia_param = self.create_publisher(
+            UInt8MultiArray, "~/metadata/param", 10
+        )
 
     def get_handles(self, storage_id=65537, object_format=0):
         """
@@ -209,7 +250,7 @@ class MultiSpectralCameraWrapper(Node):
             object_format=object_format,
             # object_handle=0,
             all_storage_ids=False if storage_id is not None else True,
-            all_formats=True if object_format==0 else False,
+            all_formats=True if object_format == 0 else False,
             in_root=False,
         )
         return handles
@@ -221,46 +262,45 @@ class MultiSpectralCameraWrapper(Node):
         handles = self.get_handles()
         dir_info = {}
         current_dir_name = None
-        for i,handle in enumerate(handles):
+        for i, handle in enumerate(handles):
             info = self.camera.get_object_info(handle)
             if info.ObjectFormat == "Association":
                 dir_info[info.Filename] = {}
-                dir_info[info.Filename]['file_count'] = 0
-                dir_info[info.Filename]['start_handle_idx'] = i+1
+                dir_info[info.Filename]["file_count"] = 0
+                dir_info[info.Filename]["start_handle_idx"] = i + 1
                 current_dir_name = info.Filename
             else:
                 if current_dir_name:
-                    dir_info[current_dir_name]['file_count'] += 1
-                    dir_info[current_dir_name]['end_handle_idx'] = i
-                    dir_info[current_dir_name]['parent_object'] = info.ParentObject
+                    dir_info[current_dir_name]["file_count"] += 1
+                    dir_info[current_dir_name]["end_handle_idx"] = i
+                    dir_info[current_dir_name]["parent_object"] = info.ParentObject
         return dir_info
-    
+
     def initiate_open_capture(self, storage_id=65537, object_format=0):
         """
         Initiate open capture or timelapse capture
-        ToDo: we can filter object format to reduce computation
-        on the camera device
         """
         # get initial directory info before initiating open capture
         self.get_logger().info("Getting directory statistics...")
         self.dir_info_init = self.get_directory_info()
-        self.get_logger().info("Directory statistic info has been initiated...")
+        self.get_logger().info("Directory statistic info retrieved...")
 
         ## Initiate timelapse capture
         self.capture = self.camera.initiate_open_capture(
-                storage_id=storage_id,
-                object_format=object_format,
+            storage_id=storage_id,
+            object_format=object_format,
         )
         # Wait for capture event
         event = self.camera.event(wait=False)
+        self.open_capture_initiated = True
         self.get_logger().info("Open capture has been initiated...")
-        
+
         self.get_logger().info("Waiting for a new directory to be initiated...")
         self.get_new_directory_info()
         self.get_logger().info("Directory info has been initiated...")
-        
+
     def stop_open_capture(self):
-        # Close the open capture session 
+        # Close the open capture session
         self.camera.terminate_open_capture(transaction_id=self.capture.TransactionID)
         self.get_logger().info("Open capture has been stopped...")
 
@@ -268,6 +308,7 @@ class MultiSpectralCameraWrapper(Node):
         # Close the PTP session
         self.camera.close_session()
         self.get_logger().info("Open camera session has been closed...")
+        self.camera_initialized = False
 
     def delete_all_files(self):
         """
@@ -278,45 +319,57 @@ class MultiSpectralCameraWrapper(Node):
             handle=0,
             object_format=0,
             delete_all=True,
-            delete_all_images=True,)
+            delete_all_images=True,
+        )
         self.get_logger().info("All files have been deleted...")
-        
+
     def get_new_directory_info(self):
         """
-        When initiate open capture is created, it should create a new direcotry.
+        When initiate_open_capture is created, it should create a new direcotry.
         This function continuously check if a new dir has been created
+        and wait until it's created
         """
-        ## Check if a new dir has been created, and wait for the new dir until it's created
         new_dir_available = False
         new_directory = None
         dir_info_new = self.get_directory_info()
-        while not new_dir_available:
+
+        while not new_dir_available and not self.stop_retrieve_event.is_set():
+            # break if stop event is detected
+            if self.stop_retrieve_event.is_set():
+                self.get_logger().info("Stop event detected, exiting directory check.")
+                break
+
             ## Check if new direcory has been created
-            if  len(list(dir_info_new.keys())) > len(list(self.dir_info_init.keys())):
+            if len(list(dir_info_new.keys())) > len(list(self.dir_info_init.keys())):
                 new_dir_available = True
-                # self.get_logger().info("New directory has been created %s",list(self.dir_info_init.keys())[-1])
-                self.get_logger().info(f"New directory has been created: {list(self.dir_info_init.keys())[-1]}")
                 new_directory = list(dir_info_new.keys())[-1]
+                self.get_logger().info(
+                    f"New directory has been created: {list(self.dir_info_init.keys())[-1]}"
+                )
 
+            self.get_logger().debug(f"No new dir is initiated: {new_dir_available}")
             dir_info_new = self.get_directory_info()
-            time.sleep(self._capture_interval)
-            
-        self.latest_directory = new_directory
-       
+            time.sleep(0.1)
 
-    def retrieve_other_files(self):
+        self.latest_directory = new_directory
+
+    def stop(self):
         """
-        diag.dat and params.dat are appended after a capture is stopped
-        retrieve them with this funton
+        Cleanup threads on shutdown or e_stop_capture has been triggered
         """
-        pass
+        self.stop_retrieve_event.set()
+        if self.retrieve_image_thread:
+            self.retrieve_image_thread.join()
+        if self.publish_image_thread:
+            self.publish_image_thread.join()
+        self.get_logger().info("Node shutdown complete.")
 
     def convert_ptp_timestamp_to_ros(self, filename, header):
         """
         Convert image time stamp from Filename to ROS timestamp
         """
         # Regex to extract date and time (matches 240930_164044)
-        match = re.search(r'(\d{6}_\d{6})', filename)
+        match = re.search(r"(\d{6}_\d{6})", filename)
 
         if match:
             # Extracted date-time string
@@ -327,25 +380,24 @@ class MultiSpectralCameraWrapper(Node):
 
             # Convert to ROS timestamp (seconds since epoch)
             secs = int(time.mktime(dt.timetuple()))
-            nsecs = 0 
+            nsecs = 0
             header.stamp = Time()
             header.stamp.sec = secs
             header.stamp.nanosec = nsecs
 
-            self.get_logger().debug(f"Extracted ROS Time: {header.stamp.sec}.{header.stamp.nanosec} seconds since epoch")
+            self.get_logger().debug(
+                f"Extracted ROS Time: {header.stamp.sec}.{header.stamp.nanosec} seconds since epoch"
+            )
         else:
             self.get_logger().debug("No valid timestamp found in filename.")
-        
+
     def retrieve_images(self):
         """
-        Retrive new images, save or publish to a ros topic
-        if publish_image_flag is enabled
-        ToDo:
-        add a trigger via a topic to enable and disable this
+        Retrive images from the camera and stro in a queue
         """
         # get latest dir info
         dir_info_new = self.get_directory_info()
-        
+
         # now start taking the image with the 2nd index of a new dir
         # +1 because the first index is the dir itself
         start_idx = dir_info_new[self.latest_directory]["start_handle_idx"] + 1
@@ -353,61 +405,69 @@ class MultiSpectralCameraWrapper(Node):
         # keep track of start_idx to be used later when retrieving
         # sequoia_diag.dat and sequoia_params.dat
         dir_start_idx = copy.deepcopy(start_idx)
-        
+
         image_count = 0
 
         prev_handles_count = 0
-
         while not self.stop_retrieve_event.is_set():
-            # # Extract the timestamp from the image filename
-            # timestamp = get_timestamp_from_filename(image_path)
-
-            # # Group images by timestamp in a dictionary
-            # image_queue.put((timestamp, image_path))
-            
             all_handles = self.get_handles()
             handles = all_handles[start_idx:]
 
             if len(handles) > 0:
-                for i,handle in enumerate(handles):
+                for i, handle in enumerate(handles):
                     info = self.camera.get_object_info(handle)
                     if info is None:
                         continue
 
-                    # save image
-                    if info.ObjectFormat in self._file_format_to_save:
+                    if info.ObjectFormat in self._file_format_to_publish:
                         obj = self.camera.get_object(handle)
+
+                        # determine buffer size
+                        # buffer_size = len(obj.Data)
+                        # if buffer_size % 1 == 0 and buffer_size % 2 != 0:
+                        #     data_type = np.uint8
+                        # elif buffer_size % 2 == 0:
+                        #     data_type = np.uint16
+                        # self.get_logger().info(f"Buffer size: {buffer_size}, Data type: {data_type}, Filename: {info.Filename}")
 
                         if not obj.Data:
                             self.get_logger().warn("No image data received.")
                             continue
 
+                        if "TIF" in info.Filename:
+                            data_type = np.uint16
+                        # ToDo: JPG sometimes has uint16, but most of the time uint8
+                        elif "JPG" in info.Filename:
+                            data_type = np.uint8
+                        else:
+                            data_type = np.uint8
+
                         # convert and decode image to np array and cv
-                        obj_array = np.frombuffer(obj.Data, self.ms_data_type)
+                        obj_array = np.frombuffer(obj.Data, data_type)
 
                         if obj_array.size == 0:
-                            self.get_logger().warn("Received empty buffer from image data.")
+                            self.get_logger().warn(
+                                "Received empty buffer from image data."
+                            )
                             continue
-
                         self.image_queue.put((info.Filename, obj_array))
 
                 start_idx += len(handles)
             else:
-                self.get_logger().info(f"No new handles to process: {str(len(all_handles))}, {str(len(handles))}, {str(start_idx)}")
-            
+                self.get_logger().info(
+                    f"No new handles to process: {str(len(all_handles))}, {str(len(handles))}, {str(start_idx)}"
+                )
+
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(self._capture_interval)
 
     def publish_image(self, delete_retrieved_file=False):
         """
-        Retrive new images, save or publish to a ros topic
-        if publish_image_flag is enabled
-        ToDo:
-        add a trigger via a topic to enable and disable this
+        Publish images stored in image_queue to ROS topics
         """
         # get latest dir info
         dir_info_new = self.get_directory_info()
-        
+
         # now start taking the image with the 2nd index of a new dir
         # +1 because the first index is the dir itself
         start_idx = dir_info_new[self.latest_directory]["start_handle_idx"] + 1
@@ -421,36 +481,32 @@ class MultiSpectralCameraWrapper(Node):
         self.get_logger().info("Publishing multispectral data...")
 
         while not self.stop_retrieve_event.is_set():
-            try:
+            if not self.image_queue.empty():
                 # Get the next image from the queue
                 filename, obj_array = self.image_queue.get(timeout=1)
-                
-                if obj_array is not None:
+                if obj_array is None:
                     continue
 
                 # decode image, and keep the image as is using arg IMREAD_UNCHANGED
                 decoded_image = cv2.imdecode(obj_array, cv2.IMREAD_UNCHANGED)
-
-                # img = cv2.imdecode(obj_array, cv2.IMREAD_COLOR)
                 if decoded_image is None:
                     self.get_logger().warn(f"Failed to decode image {str(filename)}")
                     continue
-                
-                msg_header = Header()
 
+                msg_header = Header()
                 spectrum = None
                 if "RGB" in filename:
-                    img_msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                    img_msg = self.bridge.cv2_to_imgmsg(decoded_image, encoding="bgr8")
                     self.convert_ptp_timestamp_to_ros(filename, msg_header)
                     self._pub_rgb.publish(img_msg)
                     spectrum = "RGB"
                 else:
                     # create MultispectralImage16 msg
-                    img_msg = MultispectralImage16
+                    img_msg = MultispectralImage16()
                     img_msg.height = decoded_image.shape[0]
                     img_msg.width = decoded_image.shape[1]
                     img_msg.channel = 1
-                    
+
                     # img_msg.data = decoded_image.flatten().tolist()
                     img_msg.data = obj_array.flatten().tolist()
                     self.convert_ptp_timestamp_to_ros(filename, msg_header)
@@ -468,44 +524,26 @@ class MultiSpectralCameraWrapper(Node):
                         self._pub_gre.publish(img_msg)
                         spectrum = "GRE"
 
-                if self._publish_group_images:
-                    timestamp = img_msg.header.stam.secs
-                    if timestamp not in image_groups:
-                        image_groups[timestamp] = {}
-
-                    if spectrum is not None:
-                        image_groups[timestamp][spectrum] = img_msg
-
-                    # If we have a complete set of 5 images, publish them
-                    # assuming that each comes sequentially
-                    # ToDo: run this in another thread???
-                    if len(image_groups[timestamp]) == 5:
-                        ms_msg = MultispectralImages()
-                        ms_msg.rgb = image_group[timestamp]["RGB"]
-                        ms_msg.nir = image_group[timestamp]["NIR"]
-                        ms_msg.reg = image_group[timestamp]["REG"]
-                        ms_msg.red = image_group[timestamp]["RED"]
-                        ms_msg.gre = image_group[timestamp]["GRE"]
-                        ms_msg.header = ms_msg.rgb.header
-                        # self._pub_ms_images.publish(ms_msg)
-
-                        del image_groups[timestamp]
-
                 # save files
                 if self._save_files:
                     self.get_logger().info(f"Saving {self.image_path}/{info.Filename} ")
-                    with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
+                    with open(f"{self.image_path}/{info.Filename}", mode="wb") as f:
                         f.write(obj_array)
 
-            except queue.Empty:
-                continue
-       
+            else:
+                self.get_logger().debug("Queue is empty...")
+
+            # sleep for a while
+            time.sleep(0.1)
+
         self.get_logger().warn("Camera capture has been terminated...")
         # retrieve other files such as sequoia_diag.dat and sequoia_params.data
-        self.get_logger().info("Retrieving squoia_diag.dat and sequoia_params.dat files...")
+        self.get_logger().info(
+            "Retrieving squoia_diag.dat and sequoia_params.dat files..."
+        )
         all_handles = self.get_handles()
         handles = all_handles[dir_start_idx:]
-        for i,handle in enumerate(handles):
+        for i, handle in enumerate(handles):
             info = self.camera.get_object_info(handle)
             if info is None:
                 continue
@@ -522,14 +560,13 @@ class MultiSpectralCameraWrapper(Node):
                 elif "param" in info.Filename:
                     self._pub_sequoia_param.publish(metadata_msg)
 
-                # self.get_logger().info("Saving image %s", info.Filename)
+                self.get_logger().debug("Saving image %s", info.Filename)
                 if self._save_files:
                     self.get_logger().info(f"Saving {self.image_path}/{info.Filename} ")
-                    with open(f"{self.image_path}/{info.Filename}", mode='wb') as f:
+                    with open(f"{self.image_path}/{info.Filename}", mode="wb") as f:
                         f.write(obj.Data)
-        
+
         self.get_logger().info("Capture has been stopped...")
         # delete all files
-        #if delete_retrieved_file:
+        # if delete_retrieved_file:
         #    self.camera.delete_object(handle=handle)
-
