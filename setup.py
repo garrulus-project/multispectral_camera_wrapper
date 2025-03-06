@@ -10,7 +10,6 @@ setup(
     packages=[package_name],
     data_files=[
         (os.path.join("share", package_name), glob("launch/*.launch.py")),
-        (os.path.join("share", package_name), glob("config/*.yaml")),
     ],
     install_requires=["setuptools", "sensor_msgs", "cv_bridge", "uas_msgs"],
     zip_safe=True,
