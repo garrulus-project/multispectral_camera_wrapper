@@ -38,6 +38,7 @@ class MultiSpectralCameraWrapper(Node):
         self.declare_parameter("file_format", "EXIF_JPEG,TIFF,UndefinedImage")
         self.declare_parameter("capture_interval", 1)
         self.declare_parameter("save_files", False)
+        self.declare_parameter("save_path", "/tmp")
         self.declare_parameter("debug", False)
 
         self._storage_id = self.get_parameter("storage_id").value
@@ -49,10 +50,11 @@ class MultiSpectralCameraWrapper(Node):
         )
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
+        self._save_path = self.get_parameter("save_path").value
         self._debug = self.get_parameter("debug").value
 
         if self._save_files:
-            self.image_path = os.path.join(pkg_path, "images")
+            self.image_path = os.path.join(self._save_path, "ms_images")
             os.makedirs(self.image_path, exist_ok=True)
 
         # Initialize the camera connection here, because if it's stopped and
@@ -93,7 +95,6 @@ class MultiSpectralCameraWrapper(Node):
         event_out_data = String()
         if data.data == "e_start_capture":
             event_out_data.data = "e_capture_started"
-            self._pub_event.publish(event_out_data)
 
             if not self.camera_initialized:
                 self.get_logger().error(
@@ -132,7 +133,6 @@ class MultiSpectralCameraWrapper(Node):
 
         elif data.data == "e_stop_capture":
             event_out_data.data = "e_capture_stopped"
-            self._pub_event.publish(event_out_data)
 
             if not self.camera_initialized:
                 self.get_logger().error(
@@ -154,7 +154,6 @@ class MultiSpectralCameraWrapper(Node):
                 self.initialize_camera()
 
             event_out_data.data = "e_session_started"
-            self._pub_event.publish(event_out_data)
 
         elif data.data == "e_stop_camera":
             if not self.camera_initialized:
@@ -173,10 +172,11 @@ class MultiSpectralCameraWrapper(Node):
             )
 
             event_out_data.data = "e_session_stopped"
-            self._pub_event.publish(event_out_data)
+
         else:
             event_out_data.data = "unknown trigger"
-            self._pub_event.publish(event_out_data)
+ 
+        self._pub_event.publish(event_out_data)
 
     def initialize_camera(self):
         """
@@ -439,6 +439,8 @@ class MultiSpectralCameraWrapper(Node):
                         # ToDo: JPG sometimes has uint16, but most of the time uint8
                         elif "JPG" in info.Filename:
                             data_type = np.uint8
+                            if len(obj.Data) % 2 == 0:
+                                data_type = np.uint16
                         else:
                             data_type = np.uint8
 
@@ -526,8 +528,8 @@ class MultiSpectralCameraWrapper(Node):
 
                 # save files
                 if self._save_files:
-                    self.get_logger().info(f"Saving {self.image_path}/{info.Filename} ")
-                    with open(f"{self.image_path}/{info.Filename}", mode="wb") as f:
+                    self.get_logger().info(f"Saving {self.image_path}/{filename}")
+                    with open(f"{self.image_path}/{filename}", mode="wb") as f:
                         f.write(obj_array)
 
             else:
@@ -560,7 +562,7 @@ class MultiSpectralCameraWrapper(Node):
                 elif "param" in info.Filename:
                     self._pub_sequoia_param.publish(metadata_msg)
 
-                self.get_logger().debug("Saving image %s", info.Filename)
+                self.get_logger().debug(f"Saving image {info.Filename}")
                 if self._save_files:
                     self.get_logger().info(f"Saving {self.image_path}/{info.Filename} ")
                     with open(f"{self.image_path}/{info.Filename}", mode="wb") as f:
