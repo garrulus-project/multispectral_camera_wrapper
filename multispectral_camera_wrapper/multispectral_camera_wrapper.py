@@ -39,6 +39,7 @@ class MultiSpectralCameraWrapper(Node):
         self.declare_parameter("capture_interval", 1)
         self.declare_parameter("save_files", False)
         self.declare_parameter("save_path", "/tmp")
+        self.declare_parameter("mission_id", "default_mission")
         self.declare_parameter("debug", False)
 
         self._storage_id = self.get_parameter("storage_id").value
@@ -51,10 +52,13 @@ class MultiSpectralCameraWrapper(Node):
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
         self._save_path = self.get_parameter("save_path").value
+        self._mission_id = self.get_parameter("mission_id").value
         self._debug = self.get_parameter("debug").value
 
         if self._save_files:
-            self.image_path = os.path.join(self._save_path, "ms_images")
+            self.image_path = os.path.join(
+                self._save_path, self._mission_id, "ms_images"
+            )
             os.makedirs(self.image_path, exist_ok=True)
 
         # Initialize the camera connection here, because if it's stopped and
@@ -175,7 +179,7 @@ class MultiSpectralCameraWrapper(Node):
 
         else:
             event_out_data.data = "unknown trigger"
- 
+
         self._pub_event.publish(event_out_data)
 
     def initialize_camera(self):
