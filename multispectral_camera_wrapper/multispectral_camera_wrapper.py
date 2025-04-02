@@ -52,7 +52,7 @@ class MultiSpectralCameraWrapper(Node):
         self._capture_interval = self.get_parameter("capture_interval").value
         self._save_files = self.get_parameter("save_files").value
         self._save_path = self.get_parameter("save_path").value
-        self._mission_id = self.get_parameter("mission_id").value
+        self._mission_id = str(self.get_parameter("mission_id").value)
         self._debug = self.get_parameter("debug").value
 
         if self._save_files:
@@ -206,7 +206,7 @@ class MultiSpectralCameraWrapper(Node):
             self.get_logger().error(f"Error: {e}")
             self.get_logger().error(
                 "Camera is probably not connected, "
-                "please connect the camera and restart the node.",
+                "please connect the camera and restart the node."
             )
 
     def initialize_ros_topics(self) -> None:
@@ -291,8 +291,7 @@ class MultiSpectralCameraWrapper(Node):
 
         ## Initiate timelapse capture
         self.capture = self.camera.initiate_open_capture(
-            storage_id=storage_id,
-            object_format=object_format,
+            storage_id=storage_id, object_format=object_format
         )
         # Wait for capture event
         event = self.camera.event(wait=False)
@@ -320,10 +319,7 @@ class MultiSpectralCameraWrapper(Node):
         Any session should be closed before deleting all files.
         """
         self.camera.delete_object(
-            handle=0,
-            object_format=0,
-            delete_all=True,
-            delete_all_images=True,
+            handle=0, object_format=0, delete_all=True, delete_all_images=True
         )
         self.get_logger().info("All files have been deleted...")
 

@@ -29,6 +29,9 @@ def generate_launch_description():
                 description="File format to publish or save",
             ),
             DeclareLaunchArgument(
+                "mission_id", default_value="default_mission", description="Mission ID"
+            ),
+            DeclareLaunchArgument(
                 "debug", default_value="true", description="Debug mode"
             ),
             # Define the node
@@ -45,6 +48,7 @@ def generate_launch_description():
                         "capture_interval": LaunchConfiguration("capture_interval"),
                         "file_format": LaunchConfiguration("file_format"),
                         "debug": LaunchConfiguration("debug"),
+                        "mission_id": LaunchConfiguration("mission_id"),
                     }
                 ],
             ),
