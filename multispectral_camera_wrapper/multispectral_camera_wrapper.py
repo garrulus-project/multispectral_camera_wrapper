@@ -20,6 +20,7 @@ from ament_index_python.packages import get_package_share_directory
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, UInt8MultiArray, Header
 from uas_msgs.msg import MultispectralImage16
+from pathlib import Path
 
 
 class MultiSpectralCameraWrapper(Node):
@@ -56,10 +57,9 @@ class MultiSpectralCameraWrapper(Node):
         self._debug = self.get_parameter("debug").value
 
         if self._save_files:
-            self.image_path = os.path.join(
-                self._save_path, self._mission_id, "ms_images"
-            )
-            os.makedirs(self.image_path, exist_ok=True)
+            self.image_path = Path(self._save_path) / str(self._mission_id) / "ms_images"
+            self.image_path.mkdir(parents=True, exist_ok=True)
+
 
         # Initialize the camera connection here, because if it's stopped and
         # re-initialized during runtime, it will not find the USB
@@ -73,6 +73,7 @@ class MultiSpectralCameraWrapper(Node):
 
         # create image queue and stop event
         self.image_queue = queue.Queue()
+        self.image_queue_to_download = queue.Queue()
 
         # Initialize ROS communications
         self.initialize_ros_topics()
@@ -151,6 +152,9 @@ class MultiSpectralCameraWrapper(Node):
             # stop threading
             self.stop_retrieve_event.set()
             self.stop_open_capture()
+
+            if self._save_files:
+                self._download_at_mission_ends()
 
         elif data.data == "e_start_camera":
             # initialize camera
@@ -453,6 +457,7 @@ class MultiSpectralCameraWrapper(Node):
                             )
                             continue
                         self.image_queue.put((info.Filename, obj_array))
+                        self.image_queue_to_download.put((info.Filename, obj_array))
 
                 start_idx += len(handles)
             else:
@@ -462,6 +467,17 @@ class MultiSpectralCameraWrapper(Node):
 
             # delay < 0.0 is too short and may cause the file is not yet fully written
             time.sleep(self._capture_interval)
+
+    def _download_at_mission_ends(self):
+        while not self.image_queue_to_download.empty():
+            filename, obj_array = self.image_queue_to_download.get(timeout=1)
+            if obj_array is None:
+                continue
+            file_path: Path = self.image_path / filename
+            self.get_logger().info(f"Saving {str(file_path)}")
+            with open(str(file_path), mode="wb") as f:
+                f.write(obj_array)
+
 
     def publish_image(self, delete_retrieved_file=False):
         """
@@ -527,10 +543,10 @@ class MultiSpectralCameraWrapper(Node):
                         spectrum = "GRE"
 
                 # save files
-                if self._save_files:
-                    self.get_logger().info(f"Saving {self.image_path}/{filename}")
-                    with open(f"{self.image_path}/{filename}", mode="wb") as f:
-                        f.write(obj_array)
+                # if self._save_files:
+                #     self.get_logger().info(f"Saving {self.image_path}/{filename}")
+                #     with open(f"{self.image_path}/{filename}", mode="wb") as f:
+                #         f.write(obj_array)
 
             else:
                 self.get_logger().debug("Queue is empty...")
